@@ -77,6 +77,7 @@ def get_release_to_tag(args):
 def pickle_expr(thing, f, force=False, cache_dir=None):
     path = os.path.join(cache_dir or ".", f"{thing}.pickle")
     if os.path.exists(path) and not force:
+        logger.debug("reading %s from: %s", thing, path)
         with open(path, "rb") as f:
             return pickle.load(f)
 
@@ -92,25 +93,35 @@ def sandbox(args):
 
     releases = pickle_expr("releases", lambda: get_release_to_tag(args))
 
+    # TODO ~> class Releases
     c2r = {}
     for tag_name, r in releases.items():
         c = repo.tag(tag_name).commit
+        logger.debug("resolved: tag %s -> %s", tag_name, c.hexsha)
         r["commit"] = c
         c2r[c] = r
 
-    head = repo.commit(args.rev)
+    target = repo.commit(args.rev)
+    logger.info("aiming to release: %s", target)
 
-    ptr, r = head, c2r.get(head)
+    ptr, r = target, c2r.get(target)
     try:
         while r is None:
-            if not ptr.parents:
+            if len(ptr.parents) == 0:
+                logger.debug("root commit: %s", ptr)
                 break
-            ptr = ptr.parents[0]
+
+            p = ptr.parents[0]
+            logger.debug("traversing: %s^ -> %s", ptr.hexsha, p.hexsha)
+            ptr = p
             r = c2r.get(ptr)
     except IndexError:
         assert(r == None)
 
-    print(r)
+    if r is None:
+        logger.info("no previous release")
+    else:
+        logger.info("previous release: %s", r)
 
 def main():
     args = parse_args()
