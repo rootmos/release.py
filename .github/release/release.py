@@ -117,11 +117,26 @@ def sandbox(args):
             r = c2r.get(ptr)
     except IndexError:
         assert(r == None)
-
     if r is None:
         logger.info("no previous release")
     else:
         logger.info("previous release: %s", r)
+
+    def dot_version(commit):
+        try:
+            return semver.parse(commit.tree[".version"].data_stream.read().decode())
+        except KeyError:
+            return None
+
+    v1 = dot_version(target)
+    if r is not None:
+        v0 = dot_version(r["commit"])
+    else:
+        v0 = None
+
+    print(v1, r, v0)
+
+    # match (v1, r, v0):
 
 def main():
     args = parse_args()
