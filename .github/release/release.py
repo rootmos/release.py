@@ -18,6 +18,8 @@ def env(var, default=None):
 import logging
 logger = logging.getLogger(whoami)
 
+TAG_PREFIX="releases/v"
+
 def figure_out_defaults():
     try:
         local = git.Repo(".", search_parent_directories=True)
@@ -101,8 +103,12 @@ def once[Self, A](f: Callable[[Self],A]) -> property:
 class Release:
     tag_name: str
     name: str | None
-    prerelease: bool
+    version: semver.Version
     commit: git.Commit
+
+    @property
+    def prerelease(self):
+        return bool(self.version.prerelease)
 
 class Context:
     def __init__(self, args):
@@ -155,16 +161,38 @@ class Context:
                 if raw.draft:
                     continue
 
+                if not raw.tag_name.startswith(TAG_PREFIX):
+                    logger.warning("release %s does not start with '%s': skipping", raw.tag_name, TAG_PREFIX)
+                    continue
+
+                version = semver.Version.parse(raw.tag_name.removeprefix(TAG_PREFIX))
+
                 commit = self.repo.tag(raw.tag_name).commit
                 logger.debug("resolved tag: %s -> %s", raw.tag_name, commit.hexsha)
+                dot_version = self.dot_version(commit)
+                if dot_version is None:
+                    logger.warning("release %s does not have a .version file: skipping", raw.tag_name)
+                    continue
+
+                assert(version.major == dot_version.major)
+                assert(version.minor == dot_version.minor)
+                assert(version.patch == dot_version.patch)
+
+                if dot_version.prerelease is None:
+                    assert(version.prerelease is None)
+                else:
+                    assert(version.prerelease is not None)
+                    assert(version.prerelease.startswith(dot_version.prerelease))
+                    assert(raw.prerelease)
 
                 r = Release(
                     tag_name = raw.tag_name,
                     name = raw.name,
-                    prerelease = raw.prerelease,
+                    version = version,
                     commit = commit,
                 )
 
+                logger.info("found release: %s", r)
                 rs[r.tag_name] = r
             return rs
         thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
@@ -198,7 +226,16 @@ def prepare(ctx):
 
     r = ctx.find_previous_release(bool(v1.prerelease))
 
-    v1 = v1.bump_prerelease("")
+    if r is not None:
+        v0 = r.version
+        if (v1.major == v0.major and v1.minor == v0.minor and v1.patch == v0.patch):
+            if v1.prerelease and v0.prerelease:
+                if v0.prerelease.startswith(v1.prerelease):
+                    v1 = v0.bump_prerelease("")
+
+    # make sure prereleases are "bumpable"
+    if v1 == v1.bump_prerelease(""):
+        v1 = v1.replace(prerelease = v1.prerelease + ".1")
 
     if r is None:
         return {
@@ -206,24 +243,18 @@ def prepare(ctx):
             "to": ctx.target,
         }
 
-
-    c0 = r.commit
-    v0 = ctx.dot_version(c0)
-    if v0 is None:
-        raise NotImplementedError()
-
-    if v1 == v0:
-        v1 = v1.bump_prerelease("")
-
+    v0 = r.version
     if v1 > v0:
         return {
             "previous_version": v0,
             "version": v1,
             "to": ctx.target,
-            "from": c0
+            "from": r.commit,
         }
-
-    raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
+    elif v1 == v0:
+        raise ValueError(f"refusing to release same version: {v0} -> {v1}")
+    else:
+        raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
 
 def main():
     args = parse_args()
@@ -246,7 +277,7 @@ def main():
             return
 
         ctx.github_repo.create_git_tag_and_release(
-            f"releases/v{v1}", # tag
+            TAG_PREFIX + str(v1), # tag_name
             "", # tag_message
             str(v1), # release_name
             "", # release_message
