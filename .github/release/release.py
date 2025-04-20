@@ -1,8 +1,10 @@
 import argparse
+from contextlib import closing
 import os
 import pickle
 import re
 import sys
+from typing import Any
 
 import git
 import github
@@ -70,6 +72,8 @@ def parse_dot_version(f):
     kwargs = {}
     for l in f:
         m = pattern.match(l.strip())
+        if m is None:
+            raise RuntimeError("unable to parse .version: " + l)
         k = m[1].lower()
         try:
             kwargs[k] = int(m[2])
@@ -84,6 +88,15 @@ def emit_dot_version(v, f):
     if v.prerelease:
         f.write(f"VERSION_PRERELEASE={v.prerelease}\n")
 
+def once(f):
+    x = None
+    def g(self):
+        nonlocal x
+        if x is None:
+            x = f(self)
+        return x
+    return property(g)
+
 class Context:
     def __init__(self, args):
         if args.local_repo is None:
@@ -93,32 +106,28 @@ class Context:
         self.target = self.repo.commit(args.rev)
         logger.debug("resolved target commit: %s -> %s", args.rev, self.target)
 
-        def mk_github():
-            token = os.environ.get("GITHUB_TOKEN")
-            if token is not None:
-                auth = github.Auth.Token(token)
-            else:
-                auth = None
-            return github.Github(auth=auth)
-        self._github = mk_github
+        self._github_repo = args.github_repo
 
-        def mk_github_repo():
-            return self.github.get_repo(args.github_repo)
-        self._github_repo = mk_github_repo
+        self._close: list[Any] = [self.repo]
 
-        self._releases = None
+    def close(self):
+        for c in self._close:
+            c.close()
 
-    @property
+    @once
     def github(self):
-        if callable(self._github):
-            self._github = self._github()
-        return self._github
+        token = os.environ.get("GITHUB_TOKEN")
+        if token is not None:
+            auth = github.Auth.Token(token)
+        else:
+            auth = None
+        g = github.Github(auth=auth)
+        self._close.append(g)
+        return g
 
-    @property
+    @once
     def github_repo(self):
-        if callable(self._github_repo):
-            self._github_repo = self._github_repo()
-        return self._github_repo
+        return self.github.get_repo(self._github_repo)
 
     def dot_version(self, commit):
         try:
@@ -130,7 +139,7 @@ class Context:
         logger.debug(".version in %s: %s", commit.hexsha, v)
         return v
 
-    @property
+    @once
     def releases(self):
         def f():
             logger.info("fetching releases from: %s", self.github_repo.full_name)
@@ -145,10 +154,8 @@ class Context:
                     "prerelease": r.prerelease,
                 }
             return rs
-        if self._releases is None:
-            thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
-            self._releases = pickle_expr(thing, f)
-        return self._releases
+        thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
+        return pickle_expr(thing, f)
 
     def resolve_commits_to_releases(self):
         c2r = {}
@@ -184,11 +191,14 @@ def prepare(ctx):
 
     r = ctx.find_previous_release(bool(v1.prerelease))
 
+    v1 = v1.bump_prerelease("")
+
     if r is None:
         return {
             "version": v1,
             "to": ctx.target,
         }
+
 
     c0 = r["commit"]
     v0 = ctx.dot_version(c0)
@@ -213,30 +223,30 @@ def main():
     setup_logger(args.log.upper())
     logger.debug(f"args: {args}")
 
-    ctx = Context(args)
-    rel = prepare(ctx)
-    if rel is None:
-        return
+    with closing(Context(args)) as ctx:
+        rel = prepare(ctx)
+        if rel is None:
+            return
 
-    v1, to = rel["version"], rel["to"]
-    v0, from_ = rel.get("previous_version"), rel.get("from")
+        v1, to = rel["version"], rel["to"]
+        v0, from_ = rel.get("previous_version"), rel.get("from")
 
-    logger.info("version: %s -> %s", v0, v1)
-    logger.info("commits: %s..%s", from_ or "", to)
+        logger.info("version: %s -> %s", v0, v1)
+        logger.info("commits: %s..%s", from_ or "", to)
 
-    if args.prepare_only:
-        emit_dot_version(v1, sys.stdout)
-        return
+        if args.prepare_only:
+            emit_dot_version(v1, sys.stdout)
+            return
 
-    ctx.github_repo.create_git_tag_and_release(
-        f"releases/v{v1}", # tag
-        "", # tag_message
-        str(v1), # release_name
-        "", # release_message
-        to.hexsha,
-        to.type,
-        prerelease = bool(v1.prerelease)
-    )
+        ctx.github_repo.create_git_tag_and_release(
+            f"releases/v{v1}", # tag
+            "", # tag_message
+            str(v1), # release_name
+            "", # release_message
+            to.hexsha,
+            to.type,
+            prerelease = bool(v1.prerelease)
+        )
 
 if __name__ == "__main__":
     main()
