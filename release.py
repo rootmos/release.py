@@ -78,9 +78,6 @@ def parse_dot_version(f: Iterable[str]) -> semver.Version:
             raise RuntimeError("unable to parse .version: " + l)
         k = m[1].lower()
 
-        if not m[2]:
-            continue
-
         try:
             kwargs[k] = int(m[2])
         except ValueError:
@@ -91,7 +88,7 @@ def emit_dot_version(v: semver.Version, f: TextIO) -> None:
     f.write(f"VERSION_MAJOR={v.major}\n")
     f.write(f"VERSION_MINOR={v.minor}\n")
     f.write(f"VERSION_PATCH={v.patch}\n")
-    if v.prerelease:
+    if v.prerelease is not None:
         f.write(f"VERSION_PRERELEASE={v.prerelease}\n")
 
 def once[Self, A](f: Callable[[Self],A]) -> property:
@@ -227,6 +224,7 @@ def prepare(ctx):
     if v1 is None:
         logger.info("no .version in {%s}: nothing to do", ctx.target)
         return
+    logger.debug("preparing .version: %s", repr(v1))
 
     r = ctx.find_previous_release(bool(v1.prerelease))
 
@@ -239,7 +237,10 @@ def prepare(ctx):
 
     # make sure prereleases are "bumpable"
     if v1 == v1.bump_prerelease(""):
-        v1 = v1.replace(prerelease = v1.prerelease + ".1")
+        if v1.prerelease:
+            v1 = v1.replace(prerelease = v1.prerelease + ".1")
+        else:
+            v1 = v1.replace(prerelease = "1")
 
     if r is None:
         return {
