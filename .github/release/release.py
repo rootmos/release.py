@@ -222,17 +222,17 @@ def main():
         print(rel)
         return
 
+    logger.info("creating release: %s", rel)
+
     v, to = rel["version"], rel["to"]
 
-    print()
-
-    emit_dot_version(v, sys.stdout)
+    # emit_dot_version(v, sys.stdout)
 
     ctx.github_repo.create_git_tag_and_release(
-        f"releases/v{v}",
-        str(v),
-        str(v),
-        str(v),
+        f"releases/v{v}", # tag
+        "", # tag_message
+        str(v), # release_name
+        "", # release_message
         to.hexsha,
         to.type,
         prerelease = bool(v.prerelease)
