@@ -1,14 +1,14 @@
 import argparse
 from contextlib import closing
+from dataclasses import dataclass
 import os
 import pickle
 import re
 import sys
-from typing import Any
+from typing import Any, Callable, Iterable, TextIO
 
 import git
 import github
-from github.GithubObject import NotSet
 import semver
 
 whoami = "release"
@@ -67,7 +67,7 @@ def pickle_expr(thing, f, force=False, cache_dir=None):
         pickle.dump(x, f)
     return x
 
-def parse_dot_version(f):
+def parse_dot_version(f: Iterable[str]) -> semver.Version:
     pattern = re.compile(r"^VERSION_([A-Z]+)=(.*)$")
     kwargs = {}
     for l in f:
@@ -81,14 +81,14 @@ def parse_dot_version(f):
             kwargs[k] = m[2]
     return semver.Version(**kwargs)
 
-def emit_dot_version(v, f):
+def emit_dot_version(v: semver.Version, f: TextIO) -> None:
     f.write(f"VERSION_MAJOR={v.major}\n")
     f.write(f"VERSION_MINOR={v.minor}\n")
     f.write(f"VERSION_PATCH={v.patch}\n")
     if v.prerelease:
         f.write(f"VERSION_PRERELEASE={v.prerelease}\n")
 
-def once(f):
+def once[Self, A](f: Callable[[Self],A]) -> property:
     x = None
     def g(self):
         nonlocal x
@@ -96,6 +96,13 @@ def once(f):
             x = f(self)
         return x
     return property(g)
+
+@dataclass
+class Release:
+    tag_name: str
+    name: str | None
+    prerelease: bool
+    commit: git.Commit
 
 class Context:
     def __init__(self, args):
@@ -129,7 +136,7 @@ class Context:
     def github_repo(self):
         return self.github.get_repo(self._github_repo)
 
-    def dot_version(self, commit):
+    def dot_version(self, commit) -> semver.Version | None:
         try:
             t = commit.tree[".version"].data_stream.read().decode()
         except KeyError:
@@ -144,33 +151,33 @@ class Context:
         def f():
             logger.info("fetching releases from: %s", self.github_repo.full_name)
             rs = {}
-            for r in self.github_repo.get_releases():
-                if r.draft:
+            for raw in self.github_repo.get_releases():
+                if raw.draft:
                     continue
 
-                rs[r.tag_name] = {
-                    "tag_name": r.tag_name,
-                    "name": r.name,
-                    "prerelease": r.prerelease,
-                }
+                commit = self.repo.tag(raw.tag_name).commit
+                logger.debug("resolved tag: %s -> %s", raw.tag_name, commit.hexsha)
+
+                r = Release(
+                    tag_name = raw.tag_name,
+                    name = raw.name,
+                    prerelease = raw.prerelease,
+                    commit = commit,
+                )
+
+                rs[r.tag_name] = r
             return rs
         thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
         return pickle_expr(thing, f)
 
-    def resolve_commits_to_releases(self):
-        c2r = {}
-        for tag_name, r in self.releases.items():
-            c = self.repo.tag(tag_name).commit
-            logger.debug("resolved tag: %s -> %s", tag_name, c.hexsha)
-            r["commit"] = c
-            c2r[c] = r
-        return c2r
-
     def find_previous_release(self, prereleases=False):
-        c2r = self.resolve_commits_to_releases()
+        c2r = {}
+        for _, r in self.releases.items():
+            c2r[r.commit] = r
+
         ptr, r = self.target, c2r.get(self.target)
         try:
-            while r is None or (bool(prereleases) != r["prerelease"]):
+            while r is None or (bool(prereleases) != r.prerelease):
                 if len(ptr.parents) == 0:
                     logger.debug("root commit: %s", ptr)
                     break
@@ -200,7 +207,7 @@ def prepare(ctx):
         }
 
 
-    c0 = r["commit"]
+    c0 = r.commit
     v0 = ctx.dot_version(c0)
     if v0 is None:
         raise NotImplementedError()
