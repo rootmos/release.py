@@ -276,11 +276,27 @@ def main():
             emit_dot_version(v1, sys.stdout)
             return
 
+        repo = ctx.github_repo
+        base_url = f"https://github.com/{repo.full_name}"
+        def commit_url(c):
+            return base_url + "/commit/" + c.hexsha
+
+        def compare_url(base, head):
+            return base_url + "/compare/" + base.hexsha + ".." + head.hexsha
+
+        msg = ""
+        if from_ is None:
+            msg += "Initial release\n"
+        elif from_ == to:
+            msg += f"[{from_.hexsha[:7]}]({commit_url(from_)})\n"
+        else:
+            msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
+
         ctx.github_repo.create_git_tag_and_release(
             TAG_PREFIX + str(v1), # tag_name
             "", # tag_message
             str(v1), # release_name
-            "", # release_message
+            msg, # release_message
             to.hexsha,
             to.type,
             prerelease = bool(v1.prerelease)
