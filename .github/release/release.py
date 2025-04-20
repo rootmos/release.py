@@ -77,6 +77,10 @@ def parse_dot_version(f: Iterable[str]) -> semver.Version:
         if m is None:
             raise RuntimeError("unable to parse .version: " + l)
         k = m[1].lower()
+
+        if not m[2]:
+            continue
+
         try:
             kwargs[k] = int(m[2])
         except ValueError:
@@ -286,7 +290,10 @@ def main():
 
         msg = ""
         if from_ is None:
-            msg += "Initial release\n"
+            if not bool(v1.prerelease):
+                msg += "Initial release\n"
+            else:
+                msg += "Initial pre-release\n"
         elif from_ == to:
             msg += f"[{from_.hexsha[:7]}]({commit_url(from_)})\n"
         else:
