@@ -182,7 +182,7 @@ def prepare(ctx):
         logger.info("no .version in {%s}: nothing to do", ctx.target)
         return
 
-    r = ctx.find_previous_release()
+    r = ctx.find_previous_release(bool(v1.prerelease))
 
     if r is None:
         return {
