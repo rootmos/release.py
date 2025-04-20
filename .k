@@ -5,9 +5,10 @@ export GITHUB_TOKEN
 
 refresh() {
     git fetch --tag
-    rm *.pickle
+    rm ./*.pickle
 }
 
 go() {
-    release -n
+    #release -n
+    release -p
 }

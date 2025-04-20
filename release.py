@@ -25,7 +25,6 @@ def figure_out_defaults():
         local = git.Repo(".", search_parent_directories=True)
         origin = local.remotes["origin"]
         return local.working_dir, re.sub(r'^(https://github.com/|git@github.com:)(.*)\.git$', r'\2', origin.url)
-
     except IndexError | git.InvalidGitRepositoryError:
         return None, None
 
@@ -43,12 +42,12 @@ def parse_args():
     parser.add_argument("--local-repo", default=env("LOCAL_REPOSITORY", os.environ.get("GITHUB_WORKSPACE", default_local)), help="local clone of the repository")
     parser.add_argument("--rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), help="revision to release")
 
-    subparsers = parser.add_subparsers(dest="cmd")
-    def add_subcommand(cmd):
-        return subparsers.add_parser(cmd, formatter_class=parser.formatter_class)
+    parser.add_argument("--dot-release", default=".release", help="write a .version-formatted file with the release version (relative the local repository's workdir)")
+    parser.add_argument("--dot-release-json", default=".release.json", help="write a json file with the (intended) release metadata (relative the local repository's workdir)")
 
-    prepare_cmd = add_subcommand("prepare")
-    release_cmd = add_subcommand("release")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("-p", "--prepare", dest="action", action="store_const", const="prepare")
+    action.add_argument("-r", "--release", dest="action", action="store_const", const="release")
 
     return parser.parse_args()
 
@@ -282,8 +281,13 @@ def run(args, ctx):
     logger.info("version: %s -> %s", v0, v1)
     logger.info("commits: %s..%s", from_ or "", to)
 
-    if args.cmd == "prepare":
-        emit_dot_version(v1, sys.stdout)
+    if args.action == "prepare":
+        dot_release = os.path.join(ctx.repo.working_dir, args.dot_release)
+        logger.debug("writing .version-formatted release version to: %s", dot_release)
+        with open(dot_release, "w") as f:
+            emit_dot_version(v1, f)
+
+        logger.debug("preparation done: bye")
         return
 
     assert(args.cmd == "release" or args.cmd is None)
