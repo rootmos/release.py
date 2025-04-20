@@ -226,12 +226,12 @@ def prepare(ctx):
         return
     logger.debug("preparing .version: %s", repr(v1))
 
-    r = ctx.find_previous_release(bool(v1.prerelease))
+    r = ctx.find_previous_release(v1.prerelease is not None)
 
     if r is not None:
         v0 = r.version
         if (v1.major == v0.major and v1.minor == v0.minor and v1.patch == v0.patch):
-            if v1.prerelease and v0.prerelease:
+            if v1.prerelease is not None and v0.prerelease is not None:
                 if v0.prerelease.startswith(v1.prerelease):
                     v1 = v0.bump_prerelease("")
 
