@@ -61,6 +61,18 @@ def pickle_expr(thing, f, force=False, cache_dir=None):
         pickle.dump(x, f)
     return x
 
+def parse_dot_version(f):
+    pattern = re.compile(r"^VERSION_([A-Z]+)=(.*)$")
+    kwargs = {}
+    for l in f:
+        m = pattern.match(l.strip())
+        k = m[1].lower()
+        try:
+            kwargs[k] = int(m[2])
+        except ValueError:
+            kwargs[k] = m[2]
+    return semver.Version(**kwargs)
+
 class Context:
     def __init__(self, args):
         if args.local_repo is None:
@@ -103,7 +115,7 @@ class Context:
         except KeyError:
             return None
 
-        v = semver.Version.parse(t)
+        v = parse_dot_version(t.splitlines())
         logger.debug(".version in %s: %s", commit.hexsha, v)
         return v
 
@@ -153,9 +165,7 @@ class Context:
             assert(r == None)
         return r
 
-def sandbox(args):
-    ctx = Context(args)
-
+def prepare(ctx):
     v1 = ctx.dot_version(ctx.target)
     if v1 is None:
         print(f"no .version in {ctx.target}: nothing to do")
@@ -163,19 +173,36 @@ def sandbox(args):
 
     r = ctx.find_previous_release()
 
-    if r is not None:
-        v0 = ctx.dot_version(r["commit"])
-    else:
-        v0 = None
+    if r is None:
+        return {
+            "version": v1,
+            "to": ctx.target.hexsha,
+        }
 
-    print(v1, r, v0)
+    c0 = r["commit"]
+    v0 = ctx.dot_version(c0)
+    if v0 is None:
+        raise NotImplementedError()
+
+    if v1 == v0:
+        v1 = v1.bump_prerelease("")
+    elif v1 > v0:
+        return {
+            "previous_version": v0,
+            "version": v1,
+            "to": ctx.target.hexsha,
+            "from": c0
+        }
+
+    raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
 
 def main():
     args = parse_args()
     setup_logger(args.log.upper())
     logger.debug(f"args: {args}")
 
-    sandbox(args)
+    ctx = Context(args)
+    print(prepare(ctx))
 
 if __name__ == "__main__":
     main()
