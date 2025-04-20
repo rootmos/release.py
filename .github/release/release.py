@@ -2,9 +2,11 @@ import argparse
 import os
 import pickle
 import re
+import sys
 
 import git
 import github
+from github.GithubObject import NotSet
 import semver
 
 whoami = "release"
@@ -33,6 +35,8 @@ def parse_args():
     default_local, default_repo = figure_out_defaults()
     parser.add_argument("--github-repo", default=env("GITHUB_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", default_repo)), help="owner/repo GitHub repository")
     parser.add_argument("--local-repo", default=env("LOCAL_REPOSITORY", os.environ.get("GITHUB_WORKSPACE", default_local)), help="local clone of the repository")
+
+    parser.add_argument("-p", "--prepare-only", action="store_true")
 
     parser.add_argument("rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), nargs="?", help="revision to release")
 
@@ -72,6 +76,13 @@ def parse_dot_version(f):
         except ValueError:
             kwargs[k] = m[2]
     return semver.Version(**kwargs)
+
+def emit_dot_version(v, f):
+    f.write(f"VERSION_MAJOR={v.major}\n")
+    f.write(f"VERSION_MINOR={v.minor}\n")
+    f.write(f"VERSION_PATCH={v.patch}\n")
+    if v.prerelease:
+        f.write(f"VERSION_PRERELEASE={v.prerelease}\n")
 
 class Context:
     def __init__(self, args):
@@ -168,7 +179,7 @@ class Context:
 def prepare(ctx):
     v1 = ctx.dot_version(ctx.target)
     if v1 is None:
-        print(f"no .version in {ctx.target}: nothing to do")
+        logger.info("no .version in {%s}: nothing to do", ctx.target)
         return
 
     r = ctx.find_previous_release()
@@ -176,7 +187,7 @@ def prepare(ctx):
     if r is None:
         return {
             "version": v1,
-            "to": ctx.target.hexsha,
+            "to": ctx.target,
         }
 
     c0 = r["commit"]
@@ -186,11 +197,12 @@ def prepare(ctx):
 
     if v1 == v0:
         v1 = v1.bump_prerelease("")
-    elif v1 > v0:
+
+    if v1 > v0:
         return {
             "previous_version": v0,
             "version": v1,
-            "to": ctx.target.hexsha,
+            "to": ctx.target,
             "from": c0
         }
 
@@ -202,7 +214,29 @@ def main():
     logger.debug(f"args: {args}")
 
     ctx = Context(args)
-    print(prepare(ctx))
+    rel = prepare(ctx)
+    if rel is None:
+        return
+
+    if args.prepare_only:
+        print(rel)
+        return
+
+    v, to = rel["version"], rel["to"]
+
+    print()
+
+    emit_dot_version(v, sys.stdout)
+
+    ctx.github_repo.create_git_tag_and_release(
+        f"releases/v{v}",
+        str(v),
+        str(v),
+        str(v),
+        to.hexsha,
+        to.type,
+        prerelease = bool(v.prerelease)
+    )
 
 if __name__ == "__main__":
     main()
