@@ -49,31 +49,6 @@ def setup_logger(level):
 
     logger.addHandler(ch)
 
-def mk_github(args):
-    token = os.environ.get("GITHUB_TOKEN")
-    if token is not None:
-        auth = github.Auth.Token(token)
-    else:
-        auth = None
-    return github.Github(auth=auth)
-
-def get_release_to_tag(args):
-    repo = mk_github(args).get_repo(args.github_repo)
-
-    logger.info("fetching releases from: %s", repo.full_name)
-
-    releases = {}
-    for r in repo.get_releases():
-        if r.draft:
-            continue
-
-        releases[r.tag_name] = {
-            "tag_name": r.tag_name,
-            "name": r.name,
-            "prerelease": r.prerelease,
-        }
-    return releases
-
 def pickle_expr(thing, f, force=False, cache_dir=None):
     path = os.path.join(cache_dir or ".", f"{thing}.pickle")
     if os.path.exists(path) and not force:
@@ -86,57 +61,114 @@ def pickle_expr(thing, f, force=False, cache_dir=None):
         pickle.dump(x, f)
     return x
 
-def sandbox(args):
-    if args.local_repo is None:
-        raise NotImplementedError("clone repo")
-    repo = git.Repo(args.local_repo)
+class Context:
+    def __init__(self, args):
+        if args.local_repo is None:
+            raise NotImplementedError("clone repo")
+        self.repo = git.Repo(args.local_repo)
 
-    releases = pickle_expr("releases", lambda: get_release_to_tag(args))
+        self.target = self.repo.commit(args.rev)
+        logger.debug("resolved target commit: %s -> %s", args.rev, self.target)
 
-    # TODO ~> class Releases
-    c2r = {}
-    for tag_name, r in releases.items():
-        c = repo.tag(tag_name).commit
-        logger.debug("resolved: tag %s -> %s", tag_name, c.hexsha)
-        r["commit"] = c
-        c2r[c] = r
+        def mk_github():
+            token = os.environ.get("GITHUB_TOKEN")
+            if token is not None:
+                auth = github.Auth.Token(token)
+            else:
+                auth = None
+            return github.Github(auth=auth)
+        self._github = mk_github
 
-    target = repo.commit(args.rev)
-    logger.info("aiming to release: %s", target)
+        def mk_github_repo():
+            return self.github.get_repo(args.github_repo)
+        self._github_repo = mk_github_repo
 
-    ptr, r = target, c2r.get(target)
-    try:
-        while r is None:
-            if len(ptr.parents) == 0:
-                logger.debug("root commit: %s", ptr)
-                break
+        self._releases = None
 
-            p = ptr.parents[0]
-            logger.debug("traversing: %s^ -> %s", ptr.hexsha, p.hexsha)
-            ptr = p
-            r = c2r.get(ptr)
-    except IndexError:
-        assert(r == None)
-    if r is None:
-        logger.info("no previous release")
-    else:
-        logger.info("previous release: %s", r)
+    @property
+    def github(self):
+        if callable(self._github):
+            self._github = self._github()
+        return self._github
 
-    def dot_version(commit):
+    @property
+    def github_repo(self):
+        if callable(self._github_repo):
+            self._github_repo = self._github_repo()
+        return self._github_repo
+
+    def dot_version(self, commit):
         try:
-            return semver.parse(commit.tree[".version"].data_stream.read().decode())
+            t = commit.tree[".version"].data_stream.read().decode()
         except KeyError:
             return None
 
-    v1 = dot_version(target)
+        v = semver.Version.parse(t)
+        logger.debug(".version in %s: %s", commit.hexsha, v)
+        return v
+
+    @property
+    def releases(self):
+        def f():
+            logger.info("fetching releases from: %s", self.github_repo.full_name)
+            rs = {}
+            for r in self.github_repo.get_releases():
+                if r.draft:
+                    continue
+
+                rs[r.tag_name] = {
+                    "tag_name": r.tag_name,
+                    "name": r.name,
+                    "prerelease": r.prerelease,
+                }
+            return rs
+        if self._releases is None:
+            thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
+            self._releases = pickle_expr(thing, f)
+        return self._releases
+
+    def resolve_commits_to_releases(self):
+        c2r = {}
+        for tag_name, r in self.releases.items():
+            c = self.repo.tag(tag_name).commit
+            logger.debug("resolved tag: %s -> %s", tag_name, c.hexsha)
+            r["commit"] = c
+            c2r[c] = r
+        return c2r
+
+    def find_previous_release(self):
+        c2r = self.resolve_commits_to_releases()
+        ptr, r = self.target, c2r.get(self.target)
+        try:
+            while r is None:
+                if len(ptr.parents) == 0:
+                    logger.debug("root commit: %s", ptr)
+                    break
+
+                p = ptr.parents[0]
+                logger.debug("traversing: %s^ -> %s", ptr.hexsha, p.hexsha)
+                ptr = p
+                r = c2r.get(ptr)
+        except IndexError:
+            assert(r == None)
+        return r
+
+def sandbox(args):
+    ctx = Context(args)
+
+    v1 = ctx.dot_version(ctx.target)
+    if v1 is None:
+        print(f"no .version in {ctx.target}: nothing to do")
+        return
+
+    r = ctx.find_previous_release()
+
     if r is not None:
-        v0 = dot_version(r["commit"])
+        v0 = ctx.dot_version(r["commit"])
     else:
         v0 = None
 
     print(v1, r, v0)
-
-    # match (v1, r, v0):
 
 def main():
     args = parse_args()
