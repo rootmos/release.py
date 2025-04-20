@@ -36,13 +36,19 @@ def parse_args():
 
     parser.add_argument("--log", default=env("LOG_LEVEL", "WARN"), help="set log level")
 
+    parser.add_argument("-n", "--dry-run", action="store_true")
+
     default_local, default_repo = figure_out_defaults()
     parser.add_argument("--github-repo", default=env("GITHUB_REPOSITORY", os.environ.get("GITHUB_REPOSITORY", default_repo)), help="owner/repo GitHub repository")
     parser.add_argument("--local-repo", default=env("LOCAL_REPOSITORY", os.environ.get("GITHUB_WORKSPACE", default_local)), help="local clone of the repository")
+    parser.add_argument("--rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), help="revision to release")
 
-    parser.add_argument("-p", "--prepare-only", action="store_true")
+    subparsers = parser.add_subparsers(dest="cmd")
+    def add_subcommand(cmd):
+        return subparsers.add_parser(cmd, formatter_class=parser.formatter_class)
 
-    parser.add_argument("rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), nargs="?", help="revision to release")
+    prepare_cmd = add_subcommand("prepare")
+    release_cmd = add_subcommand("release")
 
     return parser.parse_args()
 
@@ -219,6 +225,10 @@ class Context:
             assert(r == None)
         return r
 
+@dataclass
+class Prep:
+    pass
+
 def prepare(ctx):
     v1 = ctx.dot_version(ctx.target)
     if v1 is None:
@@ -261,45 +271,43 @@ def prepare(ctx):
     else:
         raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
 
-def main():
-    args = parse_args()
-    setup_logger(args.log.upper())
-    logger.debug(f"args: {args}")
+def run(args, ctx):
+    rel = prepare(ctx)
+    if rel is None:
+        return
 
-    with closing(Context(args)) as ctx:
-        rel = prepare(ctx)
-        if rel is None:
-            return
+    v1, to = rel["version"], rel["to"]
+    v0, from_ = rel.get("previous_version"), rel.get("from")
 
-        v1, to = rel["version"], rel["to"]
-        v0, from_ = rel.get("previous_version"), rel.get("from")
+    logger.info("version: %s -> %s", v0, v1)
+    logger.info("commits: %s..%s", from_ or "", to)
 
-        logger.info("version: %s -> %s", v0, v1)
-        logger.info("commits: %s..%s", from_ or "", to)
+    if args.cmd == "prepare":
+        emit_dot_version(v1, sys.stdout)
+        return
 
-        if args.prepare_only:
-            emit_dot_version(v1, sys.stdout)
-            return
+    assert(args.cmd == "release" or args.cmd is None)
 
-        repo = ctx.github_repo
-        base_url = f"https://github.com/{repo.full_name}"
-        def commit_url(c):
-            return base_url + "/commit/" + c.hexsha
+    repo = ctx.github_repo
+    base_url = f"https://github.com/{repo.full_name}"
+    def commit_url(c):
+        return base_url + "/commit/" + c.hexsha
 
-        def compare_url(base, head):
-            return base_url + "/compare/" + base.hexsha + ".." + head.hexsha
+    def compare_url(base, head):
+        return base_url + "/compare/" + base.hexsha + ".." + head.hexsha
 
-        msg = ""
-        if from_ is None:
-            if not bool(v1.prerelease):
-                msg += "Initial release\n"
-            else:
-                msg += "Initial pre-release\n"
-        elif from_ == to:
-            msg += f"[{from_.hexsha[:7]}]({commit_url(from_)})\n"
+    msg = ""
+    if from_ is None:
+        if not bool(v1.prerelease):
+            msg += "Initial release\n"
         else:
-            msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
+            msg += "Initial pre-release\n"
+    elif from_ == to:
+        msg += f"[{from_.hexsha[:7]}]({commit_url(from_)})\n"
+    else:
+        msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
 
+    if not args.dry_run:
         ctx.github_repo.create_git_tag_and_release(
             TAG_PREFIX + str(v1), # tag_name
             "", # tag_message
@@ -309,6 +317,17 @@ def main():
             to.type,
             prerelease = bool(v1.prerelease)
         )
+    else:
+        # TODO show what would have been executed
+        pass
+
+def main():
+    args = parse_args()
+    setup_logger(args.log.upper())
+    logger.debug(f"args: {args}")
+
+    with closing(Context(args)) as ctx:
+        run(args, ctx)
 
 if __name__ == "__main__":
     main()
