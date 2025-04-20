@@ -159,11 +159,11 @@ class Context:
             c2r[c] = r
         return c2r
 
-    def find_previous_release(self):
+    def find_previous_release(self, prereleases=False):
         c2r = self.resolve_commits_to_releases()
         ptr, r = self.target, c2r.get(self.target)
         try:
-            while r is None:
+            while r is None or (bool(prereleases) != r["prerelease"]):
                 if len(ptr.parents) == 0:
                     logger.debug("root commit: %s", ptr)
                     break
@@ -218,24 +218,24 @@ def main():
     if rel is None:
         return
 
+    v1, to = rel["version"], rel["to"]
+    v0, from_ = rel.get("previous_version"), rel.get("from")
+
+    logger.info("version: %s -> %s", v0, v1)
+    logger.info("commits: %s..%s", from_ or "", to)
+
     if args.prepare_only:
-        print(rel)
+        emit_dot_version(v1, sys.stdout)
         return
 
-    logger.info("creating release: %s", rel)
-
-    v, to = rel["version"], rel["to"]
-
-    # emit_dot_version(v, sys.stdout)
-
     ctx.github_repo.create_git_tag_and_release(
-        f"releases/v{v}", # tag
+        f"releases/v{v1}", # tag
         "", # tag_message
-        str(v), # release_name
+        str(v1), # release_name
         "", # release_message
         to.hexsha,
         to.type,
-        prerelease = bool(v.prerelease)
+        prerelease = bool(v1.prerelease)
     )
 
 if __name__ == "__main__":
