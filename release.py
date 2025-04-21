@@ -1,6 +1,6 @@
 import argparse
 from contextlib import closing
-from dataclasses import asdict, astuple, dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
@@ -282,7 +282,7 @@ class Asset:
     sha256: str
 
 def generate_release_message(ctx: Context, range_: Range, assets: list[Asset]) -> str:
-    (to, v1, from_, _) = astuple(range_)
+    to, v1, from_, _ = range_.to, range_.v1, range_.from_, range_.v0
     base_url = f"https://github.com/{ctx.github_repo.full_name}"
     def commit_url(c):
         return base_url + "/commit/" + c.hexsha
@@ -325,7 +325,7 @@ def prepare(args, ctx) -> Prep | None:
     if range_ is None:
         return
 
-    (to, v1, from_, v0) = astuple(range_)
+    to, v1, from_, v0 = range_.to, range_.v1, range_.from_, range_.v0
     logger.info("version: %s -> %s", v0, v1)
     logger.info("commits: %s..%s", from_ or "", to)
 
