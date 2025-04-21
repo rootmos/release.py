@@ -1,8 +1,7 @@
 import argparse
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 import hashlib
-import json
 import os
 import pickle
 import re
@@ -10,6 +9,7 @@ from typing import Any, Callable, Iterable, TextIO
 
 import git
 import github
+import magic
 import semver
 
 whoami = "release"
@@ -43,8 +43,8 @@ def parse_args():
     parser.add_argument("--local-repo", default=env("LOCAL_REPOSITORY", os.environ.get("GITHUB_WORKSPACE", default_local)), help="local clone of the repository")
     parser.add_argument("--rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), help="revision to release")
 
-    parser.add_argument("--dot-release", default=".release", help="write a .version-formatted file with the release version (relative the local repository's workdir)")
-    parser.add_argument("--dot-release-json", default=".release.json", help="write a json file with the (intended) release metadata (relative the local repository's workdir)")
+    parser.add_argument("--dot-release", metavar="FILENAME", default=".release", help="write a .version-formatted file with the release version (relative the local repository's workdir)")
+    parser.add_argument("--release-prep-file", metavar="FILENAME", default=".release.pickle", help="keep prepared state in FILE (relative the local repository's workdir)")
 
     action = parser.add_mutually_exclusive_group()
     action.add_argument("-p", "--prepare", dest="action", action="store_const", const="prepare")
@@ -280,8 +280,28 @@ class Asset:
     filename: str
     label: str | None
     sha256: str
+    content_type: str | None
 
-def generate_release_message(ctx: Context, range_: Range, assets: list[Asset]) -> str:
+    @staticmethod
+    def process(path_hash_label: str) -> 'Asset':
+        logger.debug("processing asset: %s", path_hash_label)
+        (path, label) = path_hash_label.split("#") if "#" in path_hash_label else (path_hash_label, None)
+
+        with open(path, "rb") as f:
+            sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+
+        ct = magic.from_file(path, mime=True)
+
+        a = Asset(path, os.path.basename(path), label, sha256, ct)
+        logger.info("asset: %s", a)
+        return a
+
+    def verify(self) -> 'Asset':
+        with open(self.path, "rb") as f:
+            assert(self.sha256 == hashlib.file_digest(f, "sha256").hexdigest())
+        return self
+
+def generate_release_message(ctx: Context, range_: Range, assets: Iterable[Asset]) -> str:
     to, v1, from_, _ = range_.to, range_.v1, range_.from_, range_.v0
     base_url = f"https://github.com/{ctx.github_repo.full_name}"
     def commit_url(c):
@@ -310,14 +330,13 @@ def generate_release_message(ctx: Context, range_: Range, assets: list[Asset]) -
 
 @dataclass
 class Prep:
+    range: Range
     tag_name: str
     tag_message: str
     release_name: str
-    release_message: str
     object: str
     type: str
     prerelease: bool
-
     assets: list[Asset]
 
 def prepare(args, ctx) -> Prep | None:
@@ -341,21 +360,14 @@ def prepare(args, ctx) -> Prep | None:
         else:
             logger.info("would have written .version-formatted release version to: %s", dot_release)
 
-    assets = []
-    for a in args.asset:
-        logger.debug("processing asset: %s", a)
-        (path, label) = a.split("#") if "#" in a else (a, None)
-        with open(path, "rb") as f:
-            sha256 = hashlib.file_digest(f, "sha256").hexdigest()
-        a = Asset(path, os.path.basename(path), label, sha256)
-        assets.append(a)
-        logger.info("release asset: %s", a)
+    assets = [ Asset.process(a) for a in args.asset ]
+    args.asset = []
 
     prep = Prep(
+        range = range_,
         tag_name = TAG_PREFIX + str(v1),
         tag_message = "",
         release_name = str(v1),
-        release_message = generate_release_message(ctx, range_, assets),
         object = to.hexsha,
         type = to.type,
         prerelease = bool(v1.prerelease),
@@ -363,42 +375,46 @@ def prepare(args, ctx) -> Prep | None:
     )
 
     if args.action == "prepare":
-        dot_release_json = args.dot_release_json
-        if not os.path.isabs(dot_release_json):
-            dot_release_json = os.path.join(ctx.repo.working_dir, dot_release_json)
+        release_prep_file = args.release_prep_file
+        if not os.path.isabs(release_prep_file):
+            release_prep_file = os.path.join(ctx.repo.working_dir, release_prep_file)
 
         if not args.dry_run:
-            logger.info("writing release prep to: %s", dot_release_json)
-            with open(dot_release_json, "w") as f:
-                json.dump(asdict(prep), f)
+            logger.info("writing release prep to: %s", release_prep_file)
+            with open(release_prep_file, "wb") as f:
+                pickle.dump(prep, f)
         else:
-            logger.info("would have written release prep to: %s", dot_release_json)
+            logger.info("would have written release prep to: %s", release_prep_file)
 
     return prep
 
 def release(args_, ctx, prep):
+    assets = [ a.verify() for a in prep.assets ] + [ Asset.process(a) for a in args_.asset ]
+
     args = [
         prep.tag_name,
         prep.tag_message,
         prep.release_name,
-        prep.release_message,
+        generate_release_message(ctx, prep.range, assets),
         prep.object,
         prep.type,
     ]
     kwargs = { "prerelease": prep.prerelease }
 
-    assets = []
-    for a in prep.assets:
+    assets_args = []
+    for a in assets:
         kw = { "name": a.filename }
         if a.label:
             kw["label"] = a.label
-        assets.append(([a.path], kw))
+        if a.content_type:
+            kw["content_type"] = a.content_type
+        assets_args.append(([a.path], kw))
 
     if not args_.dry_run:
         logger.info("creating release %s: %s", prep.tag_name, prep.release_name)
         release = ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
 
-        for (args, kwargs) in assets:
+        for (args, kwargs) in assets_args:
             release.upload_asset(*args, **kwargs)
     else:
         f = "%s.%s.%s" % (ctx.github_repo.__module__, ctx.github_repo.__class__.__qualname__, ctx.github_repo.create_git_tag_and_release.__name__)
@@ -406,17 +422,17 @@ def release(args_, ctx, prep):
 
         r = github.GitRelease.GitRelease
         f = "%s.%s.%s" % (r.__module__, r.__qualname__, r.upload_asset.__name__)
-        for (args, kwargs) in assets:
+        for (args, kwargs) in assets_args:
             print(f"{f}(*{args}, **{kwargs})")
 
 def run(args, ctx):
     if args.action == "release-prep":
-        dot_release_json = args.dot_release_json
-        if not os.path.isabs(dot_release_json):
-            dot_release_json = os.path.join(ctx.repo.working_dir, dot_release_json)
-        logger.info("reading release prep from: %s", dot_release_json)
-        with open(dot_release_json) as f:
-            prep = Prep(**json.load(f))
+        release_prep_file = args.release_prep_file
+        if not os.path.isabs(release_prep_file):
+            release_prep_file = os.path.join(ctx.repo.working_dir, release_prep_file)
+        logger.info("reading release prep from: %s", release_prep_file)
+        with open(release_prep_file, "rb") as f:
+            prep = pickle.load(f) # Prep(**json.load(f))
     else:
         prep = prepare(args, ctx)
 
