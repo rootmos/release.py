@@ -9,6 +9,5 @@ refresh() {
 }
 
 go() {
-    #release -n
-    release -p
+    release -R -n
 }

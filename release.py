@@ -1,10 +1,10 @@
 import argparse
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import asdict, astuple, dataclass
+import json
 import os
 import pickle
 import re
-import sys
 from typing import Any, Callable, Iterable, TextIO
 
 import git
@@ -33,7 +33,7 @@ def parse_args():
             description = "release tool",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    parser.add_argument("--log", default=env("LOG_LEVEL", "WARN"), help="set log level")
+    parser.add_argument("--log", default=env("LOG_LEVEL", "INFO"), help="set log level")
 
     parser.add_argument("-n", "--dry-run", action="store_true")
 
@@ -45,11 +45,17 @@ def parse_args():
     parser.add_argument("--dot-release", default=".release", help="write a .version-formatted file with the release version (relative the local repository's workdir)")
     parser.add_argument("--dot-release-json", default=".release.json", help="write a json file with the (intended) release metadata (relative the local repository's workdir)")
 
-    action = parser.add_mutually_exclusive_group(required=True)
+    action = parser.add_mutually_exclusive_group()
     action.add_argument("-p", "--prepare", dest="action", action="store_const", const="prepare")
     action.add_argument("-r", "--release", dest="action", action="store_const", const="release")
+    action.add_argument("-R", "--release-prep", dest="action", action="store_const", const="release-prep")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.action is None:
+        args.action = "release"
+
+    return args
 
 def setup_logger(level):
     logger.setLevel(level)
@@ -148,7 +154,7 @@ class Context:
     def github_repo(self):
         return self.github.get_repo(self._github_repo)
 
-    def dot_version(self, commit) -> semver.Version | None:
+    def dot_version(self, commit: git.Commit) -> semver.Version | None:
         try:
             t = commit.tree[".version"].data_stream.read().decode()
         except KeyError:
@@ -225,13 +231,17 @@ class Context:
         return r
 
 @dataclass
-class Prep:
-    pass
+class Range:
+    to: git.Commit
+    v1: semver.Version
+    from_: git.Commit | None
+    v0: semver.Version | None
 
-def prepare(ctx):
-    v1 = ctx.dot_version(ctx.target)
+def prepare_range(ctx) -> Range | None:
+    to = ctx.target
+    v1 = ctx.dot_version(to)
     if v1 is None:
-        logger.info("no .version in {%s}: nothing to do", ctx.target)
+        logger.info("no .version in {%s}: nothing to do", to)
         return
     logger.debug("preparing .version: %s", repr(v1))
 
@@ -251,52 +261,21 @@ def prepare(ctx):
         else:
             v1 = v1.replace(prerelease = "1")
 
-    if r is None:
-        return {
-            "version": v1,
-            "to": ctx.target,
-        }
+    v0, from_ = None, None
+    if r is not None:
+        v0, from_ = r.version, r.commit
+        if v1 == v0:
+            raise ValueError(f"refusing to release same version: {v0} -> {v1}")
+        elif v1 < v0:
+            raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
 
-    v0 = r.version
-    if v1 > v0:
-        return {
-            "previous_version": v0,
-            "version": v1,
-            "to": ctx.target,
-            "from": r.commit,
-        }
-    elif v1 == v0:
-        raise ValueError(f"refusing to release same version: {v0} -> {v1}")
-    else:
-        raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
+    return Range(to, v1, from_, v0)
 
-def run(args, ctx):
-    rel = prepare(ctx)
-    if rel is None:
-        return
-
-    v1, to = rel["version"], rel["to"]
-    v0, from_ = rel.get("previous_version"), rel.get("from")
-
-    logger.info("version: %s -> %s", v0, v1)
-    logger.info("commits: %s..%s", from_ or "", to)
-
-    if args.action == "prepare":
-        dot_release = os.path.join(ctx.repo.working_dir, args.dot_release)
-        logger.debug("writing .version-formatted release version to: %s", dot_release)
-        with open(dot_release, "w") as f:
-            emit_dot_version(v1, f)
-
-        logger.debug("preparation done: bye")
-        return
-
-    assert(args.cmd == "release" or args.cmd is None)
-
-    repo = ctx.github_repo
-    base_url = f"https://github.com/{repo.full_name}"
+def generate_release_message(ctx: Context, range_: Range) -> str:
+    (to, v1, from_, _) = astuple(range_)
+    base_url = f"https://github.com/{ctx.github_repo.full_name}"
     def commit_url(c):
         return base_url + "/commit/" + c.hexsha
-
     def compare_url(base, head):
         return base_url + "/compare/" + base.hexsha + ".." + head.hexsha
 
@@ -311,19 +290,91 @@ def run(args, ctx):
     else:
         msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
 
-    if not args.dry_run:
-        ctx.github_repo.create_git_tag_and_release(
-            TAG_PREFIX + str(v1), # tag_name
-            "", # tag_message
-            str(v1), # release_name
-            msg, # release_message
-            to.hexsha,
-            to.type,
-            prerelease = bool(v1.prerelease)
-        )
+    return msg
+
+@dataclass
+class Prep:
+    tag_name: str
+    tag_message: str
+    release_name: str
+    release_message: str
+    object: str
+    type: str
+    prerelease: bool
+
+def prepare(args, ctx) -> Prep:
+    range_ = prepare_range(ctx)
+    if range_ is None:
+        return
+
+    (to, v1, from_, v0) = astuple(range_)
+    logger.info("version: %s -> %s", v0, v1)
+    logger.info("commits: %s..%s", from_ or "", to)
+
+    if args.action == "prepare":
+        dot_release = args.dot_release
+        if not os.path.isabs(dot_release):
+            dot_release = os.path.join(ctx.repo.working_dir, dot_release)
+
+        if not args.dry_run:
+            logger.info("writing .version-formatted release version to: %s", dot_release)
+            with open(dot_release, "w") as f:
+                emit_dot_version(v1, f)
+        else:
+            logger.info("would have written .version-formatted release version to: %s", dot_release)
+
+    prep = Prep(
+        tag_name = TAG_PREFIX + str(v1),
+        tag_message = "",
+        release_name = str(v1),
+        release_message = generate_release_message(ctx, range_),
+        object = to.hexsha,
+        type = to.type,
+        prerelease = bool(v1.prerelease)
+    )
+
+    if args.action == "prepare":
+        dot_release_json = args.dot_release_json
+        if not os.path.isabs(dot_release_json):
+            dot_release_json = os.path.join(ctx.repo.working_dir, dot_release_json)
+
+        if not args.dry_run:
+            logger.info("writing release prep to: %s", dot_release_json)
+            with open(dot_release_json, "w") as f:
+                json.dump(asdict(prep), f)
+        else:
+            logger.info("would have written release prep to: %s", dot_release_json)
+
+    return prep
+
+def release(args_, ctx, prep):
+    args = list(asdict(prep).values())[:-1]
+    kwargs = { "prerelease": prep.prerelease }
+    if not args_.dry_run:
+        logger.info("creating release %s: %s", prep.tag_name, prep.release_name)
+        ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
     else:
-        # TODO show what would have been executed
-        pass
+        f = "%s.%s.%s" % (ctx.github_repo.__module__, ctx.github_repo.__class__.__qualname__, ctx.github_repo.create_git_tag_and_release.__name__)
+        print(f"{f}(*{args}, **{kwargs})")
+
+def run(args, ctx):
+    if args.action == "release-prep":
+        dot_release_json = args.dot_release_json
+        if not os.path.isabs(dot_release_json):
+            dot_release_json = os.path.join(ctx.repo.working_dir, dot_release_json)
+        logger.info("reading release prep from: %s", dot_release_json)
+        with open(dot_release_json) as f:
+            prep = Prep(**json.load(f))
+    else:
+        prep = prepare(args, ctx)
+
+    logger.debug("release prep: %s", prep)
+
+    if args.action == "prepare":
+        logger.debug("preparation done: bye")
+        return
+
+    release(args, ctx, prep)
 
 def main():
     args = parse_args()
