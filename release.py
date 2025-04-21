@@ -44,7 +44,8 @@ def parse_args():
     parser.add_argument("--rev", metavar="REV", default=os.environ.get("GITHUB_SHA", "HEAD"), help="revision to release")
 
     parser.add_argument("--dot-release", metavar="FILENAME", default=".release", help="write a .version-formatted file with the release version (relative the local repository's workdir)")
-    parser.add_argument("--release-prep-file", metavar="FILENAME", default=".release.pickle", help="keep prepared state in FILE (relative the local repository's workdir)")
+    parser.add_argument("--dot-release-prep-file", metavar="FILENAME", default=".release.pickle", help="keep prepared state in FILE (relative the local repository's workdir)")
+    parser.add_argument("--cache-releases", action="store_true", help="cache GitHub releases (primarily intended for a faster development cycle)")
 
     action = parser.add_mutually_exclusive_group()
     action.add_argument("-p", "--prepare", dest="action", action="store_const", const="prepare")
@@ -72,7 +73,7 @@ def setup_logger(level):
     logger.addHandler(ch)
 
 def pickle_expr(thing, f, force=False, cache_dir=None):
-    path = os.path.join(cache_dir or ".", f"{thing}.pickle")
+    path = os.path.join(cache_dir or ".", f".{thing}.pickle")
     if os.path.exists(path) and not force:
         logger.debug("reading %s from: %s", thing, path)
         with open(path, "rb") as f:
@@ -130,6 +131,8 @@ class Context:
         if args.local_repo is None:
             raise NotImplementedError("clone repo")
         self.repo = git.Repo(args.local_repo)
+
+        self.cache_releases = args.cache_releases
 
         self.target = self.repo.commit(args.rev)
         logger.debug("resolved target commit: %s -> %s", args.rev, self.target)
@@ -211,7 +214,10 @@ class Context:
                 rs[r.tag_name] = r
             return rs
         thing = f"releases.{self.github_repo.owner.login}.{self.github_repo.name}"
-        return pickle_expr(thing, f)
+        if self.cache_releases:
+            return pickle_expr(thing, f)
+        else:
+            return f()
 
     def find_previous_release(self, prereleases=False):
         c2r = {}
@@ -232,6 +238,11 @@ class Context:
         except IndexError:
             assert(r == None)
         return r
+
+    def resolve_relative_working_dir(self, path):
+        if os.path.isabs(path):
+            return path
+        return os.path.join(self.repo.working_dir, path)
 
 @dataclass
 class Range:
@@ -349,16 +360,13 @@ def prepare(args, ctx) -> Prep | None:
     logger.info("commits: %s..%s", from_ or "", to)
 
     if args.action == "prepare":
-        dot_release = args.dot_release
-        if not os.path.isabs(dot_release):
-            dot_release = os.path.join(ctx.repo.working_dir, dot_release)
-
+        path = ctx.resolve_relative_working_dir(args.dot_release)
         if not args.dry_run:
-            logger.info("writing .version-formatted release version to: %s", dot_release)
-            with open(dot_release, "w") as f:
+            logger.info("writing .version-formatted release version to: %s", path)
+            with open(path, "w") as f:
                 emit_dot_version(v1, f)
         else:
-            logger.info("would have written .version-formatted release version to: %s", dot_release)
+            logger.info("would have written .version-formatted release version to: %s", path)
 
     assets = [ Asset.process(a) for a in args.asset ]
     args.asset = []
@@ -375,16 +383,13 @@ def prepare(args, ctx) -> Prep | None:
     )
 
     if args.action == "prepare":
-        release_prep_file = args.release_prep_file
-        if not os.path.isabs(release_prep_file):
-            release_prep_file = os.path.join(ctx.repo.working_dir, release_prep_file)
-
+        path =  ctx.resolve_relative_working_dir(args.dot_release_prep_file)
         if not args.dry_run:
-            logger.info("writing release prep to: %s", release_prep_file)
-            with open(release_prep_file, "wb") as f:
+            logger.info("writing release prep to: %s", path)
+            with open(path, "wb") as f:
                 pickle.dump(prep, f)
         else:
-            logger.info("would have written release prep to: %s", release_prep_file)
+            logger.info("would have written release prep to: %s", path)
 
     return prep
 
@@ -427,12 +432,10 @@ def release(args_, ctx, prep):
 
 def run(args, ctx):
     if args.action == "release-prep":
-        release_prep_file = args.release_prep_file
-        if not os.path.isabs(release_prep_file):
-            release_prep_file = os.path.join(ctx.repo.working_dir, release_prep_file)
-        logger.info("reading release prep from: %s", release_prep_file)
-        with open(release_prep_file, "rb") as f:
-            prep = pickle.load(f) # Prep(**json.load(f))
+        path = ctx.resolve_relative_working_dir(args.dot_release_prep_file)
+        logger.info("reading release prep from: %s", path)
+        with open(path, "rb") as f:
+            prep = pickle.load(f)
     else:
         prep = prepare(args, ctx)
 

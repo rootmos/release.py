@@ -9,6 +9,5 @@ refresh() {
 }
 
 go() {
-    #release -p "$PWD/release.py#The script" && release -R -n "README.md"
-    release -n -r "$PWD/release.py#The script" "README.md"
+    release --cache-releases -p "$PWD/release.py#The script" && release -R -n "README.md"
 }
