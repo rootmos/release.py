@@ -1,0 +1,24 @@
+#!/bin/bash
+# include
+# https://git.sr.ht/~rootmos/scripts 12ea40d95377d1f203b0b65b3200275b86167a02
+# 2025-04-21T09:55:19+02:00 SHA-256:5ba75751d3b08ec107418c906420f197de887430cbf7eaae0c300117b30b0608
+# sed '2,5d' | sha256sum
+
+set -o nounset -o pipefail -o errexit
+
+INPUT=$1
+OUTPUT=${2-/dev/stdout}
+
+BASE_DIR=$(dirname "$INPUT")
+
+TMP=$(mktemp)
+trap 'rm -f $TMP' EXIT
+
+awk '{
+if(/^@include\s+"[^"]*"/) {
+    rc = system(sprintf("cat %s/%s", "'"$BASE_DIR"'", $2))
+    if(rc != 0) exit(rc)
+} else {
+    print($0)
+} }' "$INPUT" > "$TMP"
+cp "$TMP" "$OUTPUT"
