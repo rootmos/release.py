@@ -220,7 +220,7 @@ class Context:
 
         ptr, r = self.target, c2r.get(self.target)
         try:
-            while r is None or (bool(prereleases) != r.prerelease):
+            while r is None or (r.prerelease and not bool(prereleases)):
                 if len(ptr.parents) == 0:
                     logger.debug("root commit: %s", ptr)
                     break
