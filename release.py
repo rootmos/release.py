@@ -1,6 +1,7 @@
 import argparse
 from contextlib import closing
 from dataclasses import asdict, astuple, dataclass
+import hashlib
 import json
 import os
 import pickle
@@ -49,6 +50,8 @@ def parse_args():
     action.add_argument("-p", "--prepare", dest="action", action="store_const", const="prepare")
     action.add_argument("-r", "--release", dest="action", action="store_const", const="release")
     action.add_argument("-R", "--release-prep", dest="action", action="store_const", const="release-prep")
+
+    parser.add_argument("asset", metavar="FILENAME#LABEL", nargs="*")
 
     args = parser.parse_args()
 
@@ -271,7 +274,14 @@ def prepare_range(ctx) -> Range | None:
 
     return Range(to, v1, from_, v0)
 
-def generate_release_message(ctx: Context, range_: Range) -> str:
+@dataclass
+class Asset:
+    path: str
+    filename: str
+    label: str | None
+    sha256: str
+
+def generate_release_message(ctx: Context, range_: Range, assets: list[Asset]) -> str:
     (to, v1, from_, _) = astuple(range_)
     base_url = f"https://github.com/{ctx.github_repo.full_name}"
     def commit_url(c):
@@ -290,6 +300,12 @@ def generate_release_message(ctx: Context, range_: Range) -> str:
     else:
         msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
 
+    if assets:
+        msg += "\nSHA256 checksums:\n```\n"
+        for a in assets:
+            msg += f"{a.sha256}  {a.filename}\n"
+        msg += "```\n"
+
     return msg
 
 @dataclass
@@ -302,7 +318,9 @@ class Prep:
     type: str
     prerelease: bool
 
-def prepare(args, ctx) -> Prep:
+    assets: list[Asset]
+
+def prepare(args, ctx) -> Prep | None:
     range_ = prepare_range(ctx)
     if range_ is None:
         return
@@ -323,14 +341,25 @@ def prepare(args, ctx) -> Prep:
         else:
             logger.info("would have written .version-formatted release version to: %s", dot_release)
 
+    assets = []
+    for a in args.asset:
+        logger.debug("processing asset: %s", a)
+        (path, label) = a.split("#") if "#" in a else (a, None)
+        with open(path, "rb") as f:
+            sha256 = hashlib.file_digest(f, "sha256").hexdigest()
+        a = Asset(path, os.path.basename(path), label, sha256)
+        assets.append(a)
+        logger.info("release asset: %s", a)
+
     prep = Prep(
         tag_name = TAG_PREFIX + str(v1),
         tag_message = "",
         release_name = str(v1),
-        release_message = generate_release_message(ctx, range_),
+        release_message = generate_release_message(ctx, range_, assets),
         object = to.hexsha,
         type = to.type,
-        prerelease = bool(v1.prerelease)
+        prerelease = bool(v1.prerelease),
+        assets = assets,
     )
 
     if args.action == "prepare":
@@ -348,14 +377,37 @@ def prepare(args, ctx) -> Prep:
     return prep
 
 def release(args_, ctx, prep):
-    args = list(asdict(prep).values())[:-1]
+    args = [
+        prep.tag_name,
+        prep.tag_message,
+        prep.release_name,
+        prep.release_message,
+        prep.object,
+        prep.type,
+    ]
     kwargs = { "prerelease": prep.prerelease }
+
+    assets = []
+    for a in prep.assets:
+        kw = { "name": a.filename }
+        if a.label:
+            kw["label"] = a.label
+        assets.append(([a.path], kw))
+
     if not args_.dry_run:
         logger.info("creating release %s: %s", prep.tag_name, prep.release_name)
-        ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
+        release = ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
+
+        for (args, kwargs) in assets:
+            release.upload_asset(*args, **kwargs)
     else:
         f = "%s.%s.%s" % (ctx.github_repo.__module__, ctx.github_repo.__class__.__qualname__, ctx.github_repo.create_git_tag_and_release.__name__)
         print(f"{f}(*{args}, **{kwargs})")
+
+        r = github.GitRelease.GitRelease
+        f = "%s.%s.%s" % (r.__module__, r.__qualname__, r.upload_asset.__name__)
+        for (args, kwargs) in assets:
+            print(f"{f}(*{args}, **{kwargs})")
 
 def run(args, ctx):
     if args.action == "release-prep":

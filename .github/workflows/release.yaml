@@ -19,7 +19,7 @@ jobs:
       - name: Install release.py
         run: pipx install .
 
-      - run: release
+      - run: release "$PWD/release.py#The script" "README.md"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_LOG_LEVEL: DEBUG

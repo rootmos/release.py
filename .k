@@ -9,5 +9,6 @@ refresh() {
 }
 
 go() {
-    release -R -n
+    #release -p "$PWD/release.py#The script" "README.md" && jq -r .release_message .release.json
+    release -r -n "$PWD/release.py#The script" "README.md"
 }
