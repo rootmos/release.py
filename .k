@@ -11,6 +11,5 @@ refresh() {
 
 go() {
     #release --cache-releases -p "$PWD/release.py#The script" && release -R -n "README.md"
-    #python go.py
     release --cache-releases -n "$PWD/release.py"
 }

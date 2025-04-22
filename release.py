@@ -6,6 +6,7 @@ import os
 import pickle
 import re
 from typing import Any, Callable, Iterable, TextIO
+import urllib.parse
 
 import git
 import github
@@ -340,7 +341,7 @@ def render_git_ascii_graph(repo, from_, to):
 
 def generate_release_message(ctx: Context, range_: Range, assets: Iterable[Asset]) -> str:
     to, v1, from_, _ = range_.to, range_.v1, range_.from_, range_.v0
-    base_url = f"https://github.com/{ctx.github_repo.full_name}"
+    base_url = ctx.github_repo.html_url
     def commit_url(c):
         return base_url + "/commit/" + c.hexsha
     def compare_url(base, head):
@@ -448,10 +449,15 @@ def release(args_, ctx, prep):
     if not args_.dry_run:
         logger.debug("creating release: *%s **%s", args, kwargs)
         release = ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
-        logger.info("created release %s: %s", prep.release_name or prep.tag_name, release.url)
+
+        release_url = ctx.github_repo.html_url + "/releases/tag/" + urllib.parse.quote_plus(prep.tag_name)
+        logger.info("created release %s: %s", prep.release_name or prep.tag_name, release_url)
 
         for (args, kwargs) in assets_args:
             release.upload_asset(*args, **kwargs)
+            label = kwargs["name"]
+            logger.info("uploaded asset %s: %s", label, release_url + "/" + urllib.parse.quote_plus(label))
+
     else:
         f = "%s.%s.%s" % (ctx.github_repo.__module__, ctx.github_repo.__class__.__qualname__, ctx.github_repo.create_git_tag_and_release.__name__)
         print(f"{f}(*{args}, **{kwargs})")
