@@ -312,6 +312,32 @@ class Asset:
             assert(self.sha256 == hashlib.file_digest(f, "sha256").hexdigest())
         return self
 
+def render_git_ascii_graph(repo, from_, to):
+    if isinstance(from_, git.Commit):
+        from_ = from_.hexsha
+    if isinstance(to, git.Commit):
+        to = to.hexsha
+
+    args = [
+        "--graph", "--no-color",
+        "--abbrev-commit", "--decorate",
+        "--pretty=oneline",
+        "--decorate-refs-exclude=refs/remotes",
+        "--decorate-refs-exclude=refs/heads",
+        "--decorate-refs-exclude=HEAD",
+    ]
+
+    if from_ is None:
+        range_ = f"..{to}"
+    elif from_ == to:
+        range_ = f"{to}^..{to}"
+    else:
+        range_ = f"{from_}^..{to}"
+
+    args.append(range_)
+
+    return repo.git.log(*args)
+
 def generate_release_message(ctx: Context, range_: Range, assets: Iterable[Asset]) -> str:
     to, v1, from_, _ = range_.to, range_.v1, range_.from_, range_.v0
     base_url = f"https://github.com/{ctx.github_repo.full_name}"
@@ -330,6 +356,8 @@ def generate_release_message(ctx: Context, range_: Range, assets: Iterable[Asset
         msg += f"[{from_.hexsha[:7]}]({commit_url(from_)})\n"
     else:
         msg += f"[{from_.hexsha[:7]}..{to.hexsha[:7]}]({compare_url(from_, to)})\n"
+
+    msg += f"\n```\n{render_git_ascii_graph(ctx.repo, from_, to)}\n```\n"
 
     if assets:
         msg += "\nSHA256 checksums:\n```\n"
@@ -396,11 +424,13 @@ def prepare(args, ctx) -> Prep | None:
 def release(args_, ctx, prep):
     assets = [ a.verify() for a in prep.assets ] + [ Asset.process(a) for a in args_.asset ]
 
+    msg = generate_release_message(ctx, prep.range, assets)
+
     args = [
         prep.tag_name,
         prep.tag_message,
         prep.release_name,
-        generate_release_message(ctx, prep.range, assets),
+        msg,
         prep.object,
         prep.type,
     ]
@@ -416,8 +446,9 @@ def release(args_, ctx, prep):
         assets_args.append(([a.path], kw))
 
     if not args_.dry_run:
-        logger.info("creating release %s: %s", prep.tag_name, prep.release_name)
+        logger.debug("creating release: *%s **%s", args, kwargs)
         release = ctx.github_repo.create_git_tag_and_release(*args, **kwargs)
+        logger.info("created release %s: %s", prep.release_name or prep.tag_name, release.url)
 
         for (args, kwargs) in assets_args:
             release.upload_asset(*args, **kwargs)
