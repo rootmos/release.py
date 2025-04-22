@@ -455,8 +455,10 @@ def release(args_, ctx, prep):
 
         for (args, kwargs) in assets_args:
             release.upload_asset(*args, **kwargs)
+
             label = kwargs["name"]
-            logger.info("uploaded asset %s: %s", label, release_url + "/" + urllib.parse.quote_plus(label))
+            asset_url = ctx.github_repo.html_url + "/releases/download/" + urllib.parse.quote_plus(prep.tag_name) + "/" + urllib.parse.quote_plus(label)
+            logger.info("uploaded asset %s: %s", label, asset_url)
 
     else:
         f = "%s.%s.%s" % (ctx.github_repo.__module__, ctx.github_repo.__class__.__qualname__, ctx.github_repo.create_git_tag_and_release.__name__)
