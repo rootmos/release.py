@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 from contextlib import closing
 from dataclasses import dataclass
@@ -329,13 +331,11 @@ def render_git_ascii_graph(repo, from_, to):
     ]
 
     if from_ is None:
-        range_ = f"..{to}"
+        args += [ f"..{to}" ]
     elif from_ == to:
-        range_ = f"{to}^..{to}"
+        args += [ f"{to}^0" ]
     else:
-        range_ = f"{from_}^..{to}"
-
-    args.append(range_)
+        args += [ f"^{from_}^@", to ]
 
     return repo.git.log(*args)
 
