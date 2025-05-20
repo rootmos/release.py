@@ -123,7 +123,7 @@ class Release:
     tag_name: str
     name: str | None
     version: semver.Version
-    commit: git.Commit
+    commit: str
 
     @property
     def prerelease(self):
@@ -143,6 +143,9 @@ class Context:
         self._github_repo = args.github_repo
 
         self._close: list[Any] = [self.repo]
+
+    def commit(self, rev: str) -> git.Commit:
+        return self.repo.commit(rev)
 
     def close(self):
         for c in self._close:
@@ -182,6 +185,8 @@ class Context:
                 if raw.draft:
                     continue
 
+                logger.debug("working with release: %s", raw)
+
                 if not raw.tag_name.startswith(TAG_PREFIX):
                     logger.warning("release %s does not start with '%s': skipping", raw.tag_name, TAG_PREFIX)
                     continue
@@ -210,7 +215,7 @@ class Context:
                     tag_name = raw.tag_name,
                     name = raw.name,
                     version = version,
-                    commit = commit,
+                    commit = commit.hexsha,
                 )
 
                 logger.info("found release: %s", r)
@@ -227,7 +232,7 @@ class Context:
         for _, r in self.releases.items():
             c2r[r.commit] = r
 
-        ptr, r = self.target, c2r.get(self.target)
+        ptr, r = self.target, c2r.get(self.target.hexsha)
         try:
             while r is None or (r.prerelease and not bool(prereleases)):
                 if len(ptr.parents) == 0:
@@ -237,7 +242,7 @@ class Context:
                 p = ptr.parents[0]
                 logger.debug("traversing: %s^ -> %s", ptr.hexsha, p.hexsha)
                 ptr = p
-                r = c2r.get(ptr)
+                r = c2r.get(ptr.hexsha)
         except IndexError:
             assert(r == None)
         return r
@@ -249,9 +254,9 @@ class Context:
 
 @dataclass
 class Range:
-    to: git.Commit
+    to: str
     v1: semver.Version
-    from_: git.Commit | None
+    from_: str | None
     v0: semver.Version | None
 
 def prepare_range(ctx) -> Range | None:
@@ -286,7 +291,7 @@ def prepare_range(ctx) -> Range | None:
         elif v1 < v0:
             raise ValueError(f"refusing to downgrade version: {v0} -> {v1}")
 
-    return Range(to, v1, from_, v0)
+    return Range(to.hexsha, v1, from_, v0)
 
 @dataclass
 class Asset:
@@ -340,7 +345,7 @@ def render_git_ascii_graph(repo, from_, to):
     return repo.git.log(*args)
 
 def generate_release_message(ctx: Context, range_: Range, assets: Iterable[Asset]) -> str:
-    to, v1, from_, _ = range_.to, range_.v1, range_.from_, range_.v0
+    to, v1, from_, _ = ctx.commit(range_.to), range_.v1, ctx.commit(range_.from_), range_.v0
     base_url = ctx.github_repo.html_url
     def commit_url(c):
         return base_url + "/commit/" + c.hexsha
@@ -384,7 +389,7 @@ def prepare(args, ctx) -> Prep | None:
     if range_ is None:
         return
 
-    to, v1, from_, v0 = range_.to, range_.v1, range_.from_, range_.v0
+    to, v1, from_, v0 = ctx.commit(range_.to), range_.v1, ctx.commit(range_.from_), range_.v0
     logger.info("version: %s -> %s", v0, v1)
     logger.info("commits: %s..%s", from_ or "", to)
 
